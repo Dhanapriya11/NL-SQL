@@ -1,5 +1,4 @@
-"""Schema-grounded text-to-SQL agent via OpenRouter (OpenAI-compatible tools)."""
-# AI Agent Module for NL-SQL
+"""Schema-grounded text-to-SQL agent via OpenRouter (OpenAI-compatible tools).""
 from __future__ import annotations
 
 import json
