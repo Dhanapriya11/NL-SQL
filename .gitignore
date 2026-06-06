@@ -6,3 +6,5 @@ venv/
 .env
 *.db-journal
 .streamlit/secrets.toml
+*.log
+.DS_Store
