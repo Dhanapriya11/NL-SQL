@@ -1,5 +1,5 @@
 """NL-to-SQL Analytics Agent — Streamlit UI."""
-
+#all fronentend code, no backend changes in this file
 import os
 import sys
 
