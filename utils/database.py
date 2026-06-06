@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import re
 import sqlite3
 from pathlib import Path
@@ -12,6 +13,11 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "database" / "company.db"
 SAMPLE_DATA_DIR = PROJECT_ROOT / "database" / "sample_data"
+
+# CSV upload configuration
+CSV_UPLOAD_TABLE_PREFIX = "uploaded_"
+MAX_CSV_SIZE_MB = 50
+UPLOADED_TABLES_KEY = "_uploaded_tables_metadata"
 
 CUSTOMER_ORDER_SQL = """
 CREATE TABLE IF NOT EXISTS customers (
@@ -231,3 +237,161 @@ def kpi_metrics() -> dict[str, float | int]:
         }
     finally:
         conn.close()
+
+
+def load_csv_to_sqlite(
+    csv_file: io.BytesIO,
+    original_filename: str,
+    session_state: dict = None,
+) -> tuple[str, pd.DataFrame, str | None]:
+    """
+    Load a CSV file into a temporary SQLite table.
+    
+    Args:
+        csv_file: BytesIO object containing CSV data
+        original_filename: Original filename for display/naming
+        session_state: Streamlit session state for metadata tracking
+        
+    Returns:
+        (table_name, dataframe, error_message)
+        - table_name: Name of the created table (with csv_ prefix) or None on error
+        - dataframe: Loaded dataframe or None on error
+        - error_message: Error description if failed, None on success
+    """
+    try:
+        # Read CSV into dataframe
+        csv_file.seek(0)
+        df = pd.read_csv(csv_file, dtype_backend="numpy_nullable", low_memory=False)
+        
+        if df.empty:
+            return None, None, "CSV file is empty."
+        
+        if len(df.columns) == 0:
+            return None, None, "CSV has no columns."
+        
+        # Sanitize column names: lowercase, replace spaces with underscores
+        df.columns = [str(col).lower().replace(" ", "_").replace("-", "_") for col in df.columns]
+        
+        # Generate table name from filename
+        base_name = Path(original_filename).stem.lower().replace("-", "_").replace(" ", "_")
+        base_name = re.sub(r"[^a-z0-9_]", "", base_name)
+        if not base_name:
+            base_name = "data"
+        
+        # Ensure unique table name
+        table_name = f"{CSV_UPLOAD_TABLE_PREFIX}{base_name}"
+        counter = 1
+        original_table_name = table_name
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            cursor = conn.cursor()
+            while True:
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,)
+                )
+                if not cursor.fetchone():
+                    break
+                table_name = f"{original_table_name}_{counter}"
+                counter += 1
+            
+            # Load dataframe into SQLite
+            df.to_sql(table_name, conn, if_exists="replace", index=False)
+            conn.commit()
+            
+            # Track uploaded table in session state
+            if session_state is not None:
+                if UPLOADED_TABLES_KEY not in session_state:
+                    session_state[UPLOADED_TABLES_KEY] = {}
+                
+                session_state[UPLOADED_TABLES_KEY][table_name] = {
+                    "filename": original_filename,
+                    "row_count": len(df),
+                    "columns": list(df.columns),
+                    "uploaded_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+            
+            return table_name, df, None
+        finally:
+            conn.close()
+            
+    except pd.errors.EmptyDataError:
+        return None, None, "CSV file is empty."
+    except pd.errors.ParserError as e:
+        return None, None, f"Failed to parse CSV: {str(e)}"
+    except Exception as e:
+        return None, None, f"Error loading CSV: {str(e)}"
+
+
+def get_uploaded_tables(session_state: dict = None) -> dict[str, dict]:
+    """
+    Get metadata for all uploaded tables in the session.
+    
+    Args:
+        session_state: Streamlit session state dict
+        
+    Returns:
+        Dict mapping table names to metadata
+    """
+    if session_state is None:
+        return {}
+    return session_state.get(UPLOADED_TABLES_KEY, {})
+
+
+def is_uploaded_table(table_name: str) -> bool:
+    """Check if a table is an uploaded CSV table."""
+    return table_name.startswith(CSV_UPLOAD_TABLE_PREFIX)
+
+
+def drop_uploaded_table(table_name: str, session_state: dict = None) -> tuple[bool, str]:
+    """
+    Drop an uploaded table from the database.
+    
+    Args:
+        table_name: Name of the table to drop
+        session_state: Streamlit session state dict
+        
+    Returns:
+        (success, message)
+    """
+    if not is_uploaded_table(table_name):
+        return False, "Can only drop uploaded tables."
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+            conn.commit()
+            
+            # Remove from session state
+            if session_state is not None and UPLOADED_TABLES_KEY in session_state:
+                session_state[UPLOADED_TABLES_KEY].pop(table_name, None)
+            
+            return True, f"Dropped table '{table_name}'."
+        finally:
+            conn.close()
+    except Exception as e:
+        return False, f"Error dropping table: {str(e)}"
+
+
+def clear_all_uploaded_tables(session_state: dict = None) -> tuple[int, str]:
+    """
+    Drop all uploaded tables from the session.
+    
+    Returns:
+        (count_dropped, error_message or empty string)
+    """
+    metadata = get_uploaded_tables(session_state)
+    count = 0
+    errors = []
+    
+    for table_name in list(metadata.keys()):
+        success, msg = drop_uploaded_table(table_name, session_state)
+        if success:
+            count += 1
+        else:
+            errors.append(msg)
+    
+    error_msg = " ".join(errors) if errors else ""
+    return count, error_msg

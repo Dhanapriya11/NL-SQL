@@ -25,7 +25,16 @@ from ui.components import (
     render_selected_history,
 )
 from ui.styles import CUSTOM_CSS
-from utils.database import get_table_info, init_db, kpi_metrics
+from utils.database import (
+    get_table_info,
+    init_db,
+    kpi_metrics,
+    load_csv_to_sqlite,
+    get_uploaded_tables,
+    clear_all_uploaded_tables,
+    is_uploaded_table,
+    UPLOADED_TABLES_KEY,
+)
 from utils.errors import AnalyticsAgentError, LLMConnectionError
 from utils.history import add_entry, clear_history
 from utils.sql_explainer import explain_sql_locally
@@ -41,6 +50,8 @@ def _init_session() -> None:
     if "db_ready" not in st.session_state:
         init_db(force=True)
         st.session_state.db_ready = True
+    if UPLOADED_TABLES_KEY not in st.session_state:
+        st.session_state[UPLOADED_TABLES_KEY] = {}
 
 
 def _build_llm(use_ollama: bool, model: str, api_key: str, ollama_base: str) -> LLMClient:
@@ -50,6 +61,41 @@ def _build_llm(use_ollama: bool, model: str, api_key: str, ollama_base: str) -> 
     else:
         kwargs["api_key"] = api_key
     return LLMClient(**kwargs)
+
+
+def _handle_csv_upload(uploaded_file) -> None:
+    """Process CSV file upload and create temporary SQLite table."""
+    if uploaded_file is None:
+        return
+    
+    try:
+        # Check file size (warn if > 50MB)
+        file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+        if file_size_mb > 50:
+            st.warning(f"⚠️ Large file ({file_size_mb:.1f} MB) - processing may take a moment...")
+        
+        # Load CSV into SQLite
+        table_name, df, error = load_csv_to_sqlite(uploaded_file, uploaded_file.name, st.session_state)
+        
+        if error:
+            st.error(f"❌ Upload failed: {error}")
+            return
+        
+        # Success!
+        st.success(f"✅ CSV uploaded successfully as table '{table_name}'")
+        st.info(f"📊 {len(df)} rows × {len(df.columns)} columns")
+        
+        # Show dataframe preview
+        with st.expander(f"Preview: {uploaded_file.name}", expanded=True):
+            st.dataframe(df.head(10), use_container_width=True)
+            if len(df) > 10:
+                st.caption(f"Showing 10 of {len(df)} rows")
+        
+        # Rerun to update schema explorer
+        st.rerun()
+        
+    except Exception as exc:
+        st.error(f"❌ Unexpected error: {str(exc)}")
 
 
 def _process_question(question: str, llm: LLMClient) -> dict:
@@ -193,12 +239,48 @@ def main() -> None:
             model = st.selectbox("OpenRouter Model", OPENROUTER_MODELS)
 
         st.markdown("---")
+        st.markdown("### 📤 Upload CSV Data")
+        uploaded_csv = st.file_uploader(
+            "Choose a CSV file",
+            type=["csv"],
+            accept_multiple_files=False,
+            help="Upload a CSV file to create a temporary SQLite table for analysis"
+        )
+        if uploaded_csv is not None:
+            _handle_csv_upload(uploaded_csv)
+        
+        st.markdown("---")
         st.markdown("### Schema explorer")
-        for tname, tdata in get_table_info().items():
-            with st.expander(f"{tname} - {tdata['count']} rows"):
-                for col in tdata["columns"]:
-                    pk = " (PK)" if col[5] else ""
-                    st.markdown(f"`{col[1]}` - {col[2]}{pk}")
+        
+        # Get table info
+        table_info = get_table_info()
+        uploaded_tables = get_uploaded_tables(st.session_state)
+        
+        # Display uploaded tables first with special styling
+        if uploaded_tables:
+            st.markdown("**Uploaded Tables:**")
+            for tname, tdata in table_info.items():
+                if is_uploaded_table(tname):
+                    meta = uploaded_tables.get(tname, {})
+                    filename = meta.get("filename", tname)
+                    with st.expander(f"📊 {tname} - {tdata['count']} rows (from {filename})"):
+                        for col in tdata["columns"]:
+                            pk = " (PK)" if col[5] else ""
+                            st.markdown(f"`{col[1]}` - {col[2]}{pk}")
+            st.divider()
+        
+        # Display built-in tables
+        builtin_count = 0
+        for tname, tdata in table_info.items():
+            if not is_uploaded_table(tname):
+                with st.expander(f"{tname} - {tdata['count']} rows"):
+                    for col in tdata["columns"]:
+                        pk = " (PK)" if col[5] else ""
+                        st.markdown(f"`{col[1]}` - {col[2]}{pk}")
+                builtin_count += 1
+        
+        if builtin_count == 0:
+            st.caption("No built-in tables available")
 
         st.markdown("---")
         render_sample_questions()
@@ -214,6 +296,11 @@ def main() -> None:
             st.session_state.selected_history = None
             st.toast("History cleared")
             st.rerun()
+        if get_uploaded_tables(st.session_state):
+            if st.button("Clear uploaded data", use_container_width=True, type="secondary"):
+                count, error = clear_all_uploaded_tables(st.session_state)
+                st.toast(f"Cleared {count} uploaded table(s)")
+                st.rerun()
 
     render_hero()
     render_kpis(kpi_metrics())

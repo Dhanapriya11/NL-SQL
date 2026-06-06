@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from utils.database import DB_PATH, list_tables
+from utils.database import DB_PATH, list_tables, is_uploaded_table
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -15,6 +15,7 @@ def read_schema(include_samples: bool = True, sample_rows: int = 3) -> str:
     Build a human-readable schema document from sqlite_master and PRAGMA.
 
     Includes column types, primary keys, foreign keys, row counts, and optional samples.
+    Uploaded tables are marked with [USER-UPLOADED] notation.
     """
     if not DB_PATH.exists():
         raise FileNotFoundError(
@@ -26,7 +27,14 @@ def read_schema(include_samples: bool = True, sample_rows: int = 3) -> str:
     lines: list[str] = ["# SQLite Database Schema", ""]
 
     try:
-        for table in list_tables():
+        tables = list_tables()
+        
+        # Separate uploaded and built-in tables
+        uploaded_tables = [t for t in tables if is_uploaded_table(t)]
+        builtin_tables = [t for t in tables if not is_uploaded_table(t)]
+        
+        # Process built-in tables first
+        for table in builtin_tables:
             cur = conn.cursor()
             cur.execute(f"PRAGMA table_info({table})")
             columns = cur.fetchall()
@@ -66,6 +74,42 @@ def read_schema(include_samples: bool = True, sample_rows: int = 3) -> str:
                     lines.append(f"  {row_dict}")
 
             lines.append("")
+
+        # Process uploaded tables with special notation
+        if uploaded_tables:
+            lines.append("## User-Uploaded Tables [TEMPORARY SESSION DATA]")
+            lines.append("")
+            
+            for table in uploaded_tables:
+                cur = conn.cursor()
+                cur.execute(f"PRAGMA table_info({table})")
+                columns = cur.fetchall()
+
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                row_count = cur.fetchone()[0]
+                
+                lines.append(f"### Table: {table} ({row_count} rows) [USER-UPLOADED]")
+                lines.append("Columns:")
+                for col in columns:
+                    cid, name, col_type, notnull, default, pk = col
+                    flags = []
+                    if pk:
+                        flags.append("PRIMARY KEY")
+                    if notnull:
+                        flags.append("NOT NULL")
+                    flag_str = f" [{', '.join(flags)}]" if flags else ""
+                    lines.append(f"  - {name} ({col_type}){flag_str}")
+
+                if include_samples and row_count > 0:
+                    cur.execute(f"SELECT * FROM {table} LIMIT {sample_rows}")
+                    samples = cur.fetchall()
+                    col_names = [c[1] for c in columns]
+                    lines.append("Sample rows:")
+                    for row in samples:
+                        row_dict = dict(zip(col_names, row))
+                        lines.append(f"  {row_dict}")
+
+                lines.append("")
 
         # Relationship hints for common analytics joins
         lines.extend(
