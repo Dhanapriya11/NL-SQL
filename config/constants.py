@@ -16,6 +16,8 @@ SAMPLE_QUESTIONS = [
     "Which department has the highest total sales?",
     "Show order details for sales in Chennai team",
     "Average unit price by product category",
+    "Show revenue trend over last 6 months",
+    "Which location has the most employees?",
 ]
 
 AGENT_STEPS = [
