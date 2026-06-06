@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import pandas as pd
-
+#this one change the path of the database to the current directory of the file, so it can be accessed correctly regardless of where the script is run from
 DB_PATH = Path(__file__).parent / "analytics_agent.db"
 
 SAMPLE_SQL = """
