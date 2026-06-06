@@ -191,15 +191,3 @@ Expected: all tests pass without network access.
 Copy `.env.example` to `.env` for local config.
 
 ---
-
-## Hackathon notes
-
-- Currency is displayed as **Rs** throughout the UI
-- Query history is stored in `database/query_history.json` and ignored by git
-- See **AI_USAGE.md** for AI-assisted development documentation
-
----
-
-## License
-
-MIT
